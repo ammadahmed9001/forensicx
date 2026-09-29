@@ -4,8 +4,8 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "forensicx"
-version = "0.1.0"
-description = "Modular Android digital forensics platform"
+version = "0.2.0"
+description = "Open-source forensic tool hub and Android forensics platform"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -27,7 +27,8 @@ dev = [
 forensicx = "forensicx.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["forensicx*", "forensicx_hub*"]
 
 [tool.ruff]
 line-length = 99

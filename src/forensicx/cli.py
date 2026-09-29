@@ -140,10 +140,21 @@ def report(case_id: int, output_path: str) -> None:
 
 @main.command()
 def gui() -> None:
-    """Launch the graphical interface."""
+    """Launch the ForensicX case management GUI."""
     try:
         from forensicx.gui.app import run_gui
         run_gui()
     except ImportError as exc:
         console.print(f"[red]GUI dependencies not available:[/] {exc}")
+        sys.exit(1)
+
+
+@main.command()
+def hub() -> None:
+    """Launch the ForensicX multi-tool hub (all forensic tools)."""
+    try:
+        from forensicx_hub.app import run_hub
+        run_hub()
+    except ImportError as exc:
+        console.print(f"[red]Hub dependencies not available:[/] {exc}")
         sys.exit(1)

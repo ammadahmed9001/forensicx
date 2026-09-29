@@ -27,7 +27,28 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Lint with ruff
-        run: ruff check src tests
+        run: ruff check src tests forensicx_hub
 
       - name: Run tests
         run: pytest --tb=short
+
+  registry-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Validate tools registry loads
+        run: |
+          python3 -c "
+          from forensicx_hub.tools_registry import ALL_TOOLS, CATEGORIES
+          print(f'Tools registered: {len(ALL_TOOLS)}')
+          print(f'Categories: {len(CATEGORIES)}')
+          for cat, tools in CATEGORIES.items():
+              print(f'  {cat}: {len(tools)} tools')
+          assert len(ALL_TOOLS) > 50, 'Expected 50+ tools'
+          print('Registry OK')
+          "
