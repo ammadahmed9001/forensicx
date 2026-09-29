@@ -1,8 +1,10 @@
 # Upstream Tools & Attribution
 
-ForensicX integrates with 60+ open-source forensic tools.
+ForensicX integrates with 161 open-source forensic tools across 17 categories.
 Tools are fetched from their upstream repositories by `scripts/install_tools.sh` and are never bundled into this repository.
 Each tool retains its original license and attribution.
+
+**Use only on devices and evidence you are authorized to examine.**
 
 ---
 
@@ -37,6 +39,7 @@ Each tool retains its original license and attribution.
 |------|--------|---------|------------|
 | Autopsy | Sleuth Kit Labs | Apache-2.0 | https://www.autopsy.com |
 | The Sleuth Kit | Brian Carrier | IBM/CPL/GPL | https://www.sleuthkit.org |
+| FTK Imager | AccessData / Exterro | Proprietary freeware | https://www.exterro.com/ftk-imager |
 | bulk_extractor | Simson Garfinkel | Public Domain | https://github.com/simsong/bulk_extractor |
 | Scalpel | Golden Richard / Vassil Roussev | GPL-2.0 | https://github.com/sleuthkit/scalpel |
 | foremost | Jesse Kornblum / Kris Kendall | Public Domain | http://foremost.sourceforge.net |
@@ -48,6 +51,8 @@ Each tool retains its original license and attribution.
 | ddrescue | Antonio Diaz | GPL-2.0 | https://www.gnu.org/software/ddrescue/ |
 | guymager | Guy Voncken | GPL-2.0 | https://guymager.sourceforge.io |
 | hashdeep / ssdeep | Jesse Kornblum | PD / GPL | https://github.com/jessek/hashdeep |
+| dcfldd | DoD / Nicholas Harbour | GPL-2.0 | https://sourceforge.net/projects/dcfldd/ |
+| Dissect | Fox-IT | Apache-2.0 | https://github.com/fox-it/dissect |
 
 ## Memory Forensics
 
@@ -83,6 +88,13 @@ Each tool retains its original license and attribution.
 | tcpdump | Van Jacobson | BSD | https://www.tcpdump.org |
 | tcpflow | Simson Garfinkel | GPL-3.0 | https://github.com/simsong/tcpflow |
 | ngrep | Jordan Ritter | BSD | https://github.com/jpr5/ngrep |
+| Suricata | OISF | GPL-2.0 | https://suricata.io |
+| Snort | Cisco Talos | GPL-2.0 | https://www.snort.org |
+| Arkime (Moloch) | AOL/Yahoo/Verizon | Apache-2.0 | https://arkime.com |
+| Kismet | Mike Kershaw (dragorn) | GPL-2.0 | https://www.kismetwireless.net |
+| nfdump / nfsen | Peter Haag | BSD | https://github.com/phaag/nfdump |
+| Zeek (Bro) | The Zeek Project | BSD | https://zeek.org |
+| dnscat2 | Ron Bowes (iagox86) | GPL-2.0 | https://github.com/iagox86/dnscat2 |
 
 ## Artifact & File Analysis
 
@@ -99,6 +111,8 @@ Each tool retains its original license and attribution.
 | zsteg | Zed-0xff | MIT | https://github.com/zed-0xff/zsteg |
 | StegExpose | b3dk7 | MIT | https://github.com/b3dk7/StegExpose |
 | steghide | Stefan Hetzl | GPL-2.0 | https://steghide.sourceforge.net |
+| DFIR ORC | ANSSI | LGPL-2.1 | https://github.com/dfir-orc/dfir-orc |
+| Dissect | Fox-IT | Apache-2.0 | https://github.com/fox-it/dissect |
 
 ## Password & Hash Analysis
 
@@ -124,6 +138,11 @@ Each tool retains its original license and attribution.
 | speakeasy | Mandiant | MIT | https://github.com/mandiant/speakeasy |
 | Detect It Easy | horsicq | MIT | https://github.com/horsicq/Detect-It-Easy |
 | pefile | Ero Carrera | MIT | https://github.com/erocarrera/pefile |
+| MobSF | Ajin Abraham | GPL-3.0 | https://github.com/MobSF/Mobile-Security-Framework-MobSF |
+| androguard | Desnos / Hugo Barre | Apache-2.0 | https://github.com/androguard/androguard |
+| frida | Ole André V. Ravnås | wxWindows Library Licence | https://frida.re |
+| objection | Dominic Chell (sensepost) | Apache-2.0 | https://github.com/sensepost/objection |
+| Cuckoo Sandbox | Cuckoo Foundation | GPL-3.0 | https://cuckoosandbox.org |
 
 ## Incident Response
 
@@ -136,6 +155,37 @@ Each tool retains its original license and attribution.
 | ir-rescue | Diogo Fernan | MIT | https://github.com/diogo-fernan/ir-rescue |
 | CrowdStrike Forensics | CrowdStrike | MIT | https://github.com/CrowdStrike/forensics |
 | KAPE | Kroll / Eric Zimmermann | Proprietary freeware | https://www.kroll.com/kape |
+| Loki | Neo23x0 (Florian Roth) | GPL-3.0 | https://github.com/Neo23x0/Loki |
+| PowerForensics | Invoke-IR | Apache-2.0 | https://github.com/Invoke-IR/PowerForensics |
+
+## Case Management & DFIR Platforms
+
+| Tool | Author | License | Repository |
+|------|--------|---------|------------|
+| DFIR-IRIS | DFIR-IRIS Project | LGPL-3.0 | https://github.com/dfir-iris/iris-web |
+| TheHive | StrangeBee | AGPL-3.0 | https://thehive-project.org |
+| Cortex | StrangeBee | AGPL-3.0 | https://github.com/TheHive-Project/Cortex |
+| OpenCTI | Filigran | Apache-2.0 | https://opencti.io |
+| MISP | CIRCL | AGPL-3.0 | https://www.misp-project.org |
+| Autopsy | Sleuth Kit Labs | Apache-2.0 | https://www.autopsy.com |
+| Magnet AXIOM | Magnet Forensics | Commercial | https://www.magnetforensics.com |
+
+## Windows Artifact Analysis
+
+| Tool | Author | License | Repository |
+|------|--------|---------|------------|
+| LECmd | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| PECmd | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| JLECmd | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| MFTCmd | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| RBCmd | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| AppCompatCacheParser | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| AmcacheParser | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| EvtxECmd | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| SrumECmd | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| WxTCmd | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
+| ShimCacheParser | Mandiant | Apache-2.0 | https://github.com/mandiant/ShimCacheParser |
+| Registry Explorer | Eric Zimmermann | MIT | https://ericzimmerman.github.io |
 
 ## OSINT
 
@@ -147,6 +197,7 @@ Each tool retains its original license and attribution.
 | Recon-ng | Tim Tomes | GPL-3.0 | https://github.com/lanmaster53/recon-ng |
 | Photon | s0md3v | GPL-3.0 | https://github.com/s0md3v/Photon |
 | Maltego Community | Paterva | Proprietary (CE free) | https://www.maltego.com |
+| OSINT Framework | lockfale | MIT | https://github.com/lockfale/osint-framework |
 
 ## Cloud & Container Forensics
 
@@ -156,6 +207,7 @@ Each tool retains its original license and attribution.
 | aws-ir | ThreatResponse | Apache-2.0 | https://github.com/ThreatResponse/aws_ir |
 | pacu | Rhino Security Labs | BSD-3-Clause | https://github.com/RhinoSecurityLabs/pacu |
 | TruffleHog | Truffle Security | AGPL-3.0 | https://github.com/trufflesecurity/trufflehog |
+| Grype | Anchore | Apache-2.0 | https://github.com/anchore/grype |
 
 ## Reporting & Utilities
 
@@ -164,6 +216,32 @@ Each tool retains its original license and attribution.
 | dfimagetools | Joachim Metz | Apache-2.0 | https://github.com/libyal/dfimagetools |
 | dfvfs | log2timeline contributors | Apache-2.0 | https://github.com/log2timeline/dfvfs |
 | Timeline Lab | CERT Société Générale | MIT | https://github.com/certsocietegenerale/timeline-lab |
+
+## Forensic Distros (Reference)
+
+| Distribution | Maintainer | License | Website |
+|--------------|------------|---------|---------|
+| SIFT Workstation | SANS Institute | Freeware | https://www.sans.org/tools/sift-workstation/ |
+| CAINE | Nanni Bassetti | GPL/Various | https://www.caine-live.net |
+| PALADIN | SUMURI | Proprietary (free) | https://sumuri.com/software/paladin/ |
+| Tsurugi Linux | Tsurugi Team | GPL/Various | https://tsurugi-linux.org |
+
+## Commercial Tools (Reference Only)
+
+These tools are documented for reference. ForensicX does not install, bundle, or replicate them.
+The hub shows their homepage when selected.
+
+| Tool | Vendor | Category |
+|------|--------|----------|
+| Cellebrite UFED | Cellebrite | Mobile acquisition |
+| Magnet AXIOM | Magnet Forensics | All-in-one forensics |
+| EnCase Forensic | OpenText | Disk & enterprise |
+| X-Ways Forensics | X-Ways | Disk & file forensics |
+| Belkasoft Evidence Center | Belkasoft | All-in-one forensics |
+| Oxygen Forensic Detective | Oxygen Forensics | Mobile forensics |
+| FTK (Forensic Toolkit) | AccessData / Exterro | Disk & enterprise |
+| Nuix Workstation | Nuix | eDiscovery & forensics |
+| Cyber Triage | Sleuth Kit Labs | Automated IR triage |
 
 ---
 

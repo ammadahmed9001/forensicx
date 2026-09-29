@@ -330,6 +330,116 @@ clone https://github.com/certsocietegenerale/timeline-lab.git  reporting/timelin
 pip_venv reporting/dfvfs
 
 # ──────────────────────────────────────────────────────────────────────────────
+# CASE MANAGEMENT / DFIR PLATFORMS
+# ──────────────────────────────────────────────────────────────────────────────
+info "=== Case Management & DFIR Platforms ==="
+mkdir -p "$TOOLS/case_mgmt"
+
+clone https://github.com/dfir-iris/iris-web.git          case_mgmt/dfir-iris
+clone https://github.com/TheHive-Project/TheHive.git     case_mgmt/TheHive
+clone https://github.com/TheHive-Project/Cortex.git      case_mgmt/Cortex
+clone https://github.com/MISP/MISP.git                   case_mgmt/MISP
+clone https://github.com/OpenCTI-Platform/opencti.git    case_mgmt/OpenCTI
+
+info "Note: DFIR-IRIS, TheHive, Cortex, MISP, OpenCTI require Docker."
+info "Run: docker compose up -d  inside the respective tool directory."
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WINDOWS ARTIFACT ANALYSIS (Eric Zimmermann Tools)
+# ──────────────────────────────────────────────────────────────────────────────
+info "=== Windows Artifacts (EZ Tools) ==="
+mkdir -p "$TOOLS/windows"
+
+EZ_BASE="https://f001.backblazeb2.com/file/EricZimmermanTools/net6"
+EZ_DIR="$TOOLS/windows/EZTools"
+mkdir -p "$EZ_DIR"
+
+for tool in LECmd PECmd JLECmd MFTCmd RBCmd AppCompatCacheParser AmcacheParser \
+            EvtxECmd SrumECmd WxTCmd SBECmd; do
+  if [[ ! -f "$EZ_DIR/${tool}" ]] && [[ ! -f "$EZ_DIR/${tool}.exe" ]]; then
+    wget -qO "/tmp/${tool}.zip" \
+      "${EZ_BASE}/${tool}.zip" \
+      && unzip -q "/tmp/${tool}.zip" -d "$EZ_DIR/${tool}/" \
+      || warn "EZ Tool ${tool} download failed; get from https://ericzimmerman.github.io/#!index.md"
+  fi
+done
+
+clone https://github.com/EricZimmermann/KAPE.git              windows/KAPE 2>/dev/null || \
+  info "KAPE: get binary from https://www.kroll.com/kape (not on GitHub)"
+clone https://github.com/sans-dfir/sift-files.git             windows/sift-cli
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ANDROID MALWARE ANALYSIS (MobSF / androguard / frida)
+# ──────────────────────────────────────────────────────────────────────────────
+info "=== Mobile App Analysis ==="
+mkdir -p "$TOOLS/mobile_re"
+
+clone https://github.com/MobSF/Mobile-Security-Framework-MobSF.git  mobile_re/MobSF
+clone https://github.com/androguard/androguard.git                   mobile_re/androguard
+clone https://github.com/frida/frida.git                             mobile_re/frida-src
+clone https://github.com/sensepost/objection.git                     mobile_re/objection
+
+pip_venv mobile_re/androguard
+pip_venv mobile_re/objection
+
+# frida-tools via pip (binaries available via pip)
+"$PY" -m pip install frida-tools --quiet 2>/dev/null || warn "frida-tools pip install failed; try: pip install frida-tools"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NETWORK DETECTION (Suricata / Snort / Zeek / Arkime / Kismet)
+# ──────────────────────────────────────────────────────────────────────────────
+info "=== Network Detection & Monitoring ==="
+mkdir -p "$TOOLS/netmon"
+
+clone https://github.com/OISF/suricata.git            netmon/suricata
+clone https://github.com/arkime/arkime.git            netmon/arkime
+clone https://github.com/kismetwireless/kismet.git    netmon/kismet
+
+apt_install suricata snort zeek kismet tshark
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SANDBOX / MALWARE DYNAMIC ANALYSIS
+# ──────────────────────────────────────────────────────────────────────────────
+info "=== Dynamic Malware Analysis ==="
+mkdir -p "$TOOLS/sandbox"
+
+clone https://github.com/cuckoosandbox/cuckoo.git     sandbox/cuckoo
+clone https://github.com/cuckoosandbox/community.git  sandbox/cuckoo-community
+
+info "Cuckoo requires VirtualBox + configuration; see https://cuckoo.sh/docs/installation/"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DISSECT (Fox-IT)
+# ──────────────────────────────────────────────────────────────────────────────
+info "=== Dissect (Fox-IT) ==="
+"$PY" -m pip install dissect --quiet 2>/dev/null || warn "dissect pip install failed"
+clone https://github.com/fox-it/dissect.git  artifacts/dissect 2>/dev/null || true
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ADDITIONAL IR TOOLS
+# ──────────────────────────────────────────────────────────────────────────────
+info "=== Additional IR Tools ==="
+
+clone https://github.com/Neo23x0/Loki.git         ir/loki
+clone https://github.com/cyb3rfox/Aurora-Incident-Response.git  ir/aurora
+clone https://github.com/Invoke-IR/PowerForensics.git  ir/powerforensics
+clone https://github.com/pentestmonkey/unix-privesc-check.git   ir/unix-privesc
+
+pip_venv ir/loki
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FORENSIC DISTRO TOOLKITS (reference scripts)
+# ──────────────────────────────────────────────────────────────────────────────
+info "=== Forensic Distro Tools ==="
+mkdir -p "$TOOLS/distros"
+
+clone https://github.com/sans-dfir/sift-saltstack.git   distros/sift-saltstack
+clone https://github.com/teamdfir/sift-cli.git          distros/sift-cli
+
+info "SIFT: Run SIFT CLI to install the full SIFT workstation: https://github.com/teamdfir/sift-cli"
+info "CAINE / PALADIN / TSURUGI are bootable ISO distributions — see their respective websites."
+
+# ──────────────────────────────────────────────────────────────────────────────
 # APT BATCH INSTALL
 # ──────────────────────────────────────────────────────────────────────────────
 if [[ ${#apt_pkgs[@]} -gt 0 ]]; then
