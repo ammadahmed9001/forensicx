@@ -1,466 +1,469 @@
 #!/usr/bin/env bash
-# ForensicX Master Tool Installer
-# Installs / updates every open-source forensic tool in the registry.
-# Usage: bash scripts/install_tools.sh [--category <cat>] [--list]
-set -euo pipefail
+# ForensicX Master Tool Installer — v2
+# Installs every open-source forensic tool.  Each tool is independent;
+# one failure NEVER stops the rest.
+#
+# Usage:
+#   bash scripts/install_tools.sh               # install everything
+#   bash scripts/install_tools.sh --list        # list tools
+#   bash scripts/install_tools.sh --category mobile   # one category only
+#   bash scripts/install_tools.sh --parallel    # clone repos in parallel
+set -uo pipefail   # NOT -e  — failures are tracked, never fatal
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TOOLS="$ROOT/tools"
 LOG="$ROOT/tools/install.log"
 mkdir -p "$TOOLS"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
-ok()   { echo -e "${GREEN}[OK]${NC}  $*"; echo "[OK]  $*" >> "$LOG"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; echo "[WARN] $*" >> "$LOG"; }
-err()  { echo -e "${RED}[ERR]${NC}  $*"; echo "[ERR]  $*" >> "$LOG"; }
-info() { echo -e "${CYAN}[INFO]${NC} $*"; echo "[INFO] $*" >> "$LOG"; }
+# ── colour / print ─────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+ok()   { echo -e "${GREEN}✓${NC}  $*"; echo "[OK]   $*" >> "$LOG"; ((PASS++)) || true; }
+warn() { echo -e "${YELLOW}⚠${NC}  $*"; echo "[WARN] $*" >> "$LOG"; }
+err()  { echo -e "${RED}✗${NC}  $*"; echo "[FAIL] $*" >> "$LOG"; ((FAIL++)) || true; }
+info() { echo -e "${CYAN}→${NC}  $*"; echo "[INFO] $*" >> "$LOG"; }
+head() { echo; echo -e "${BOLD}${CYAN}══ $* ══${NC}"; echo "== $* ==" >> "$LOG"; }
 
-need() { command -v "$1" >/dev/null 2>&1 || { err "Missing required tool: $1"; exit 1; }; }
-have() { command -v "$1" >/dev/null 2>&1; }
+PASS=0; FAIL=0; SKIP=0
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  ForensicX install started" > "$LOG"
 
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  ForensicX install started" >> "$LOG"
+# ── argument parsing ───────────────────────────────────────────────────────────
+ONLY_CAT=""; LIST_ONLY=false; PARALLEL=false; FORCE=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --category) ONLY_CAT="${2:-}"; shift 2 ;;
+    --list)     LIST_ONLY=true; shift ;;
+    --parallel) PARALLEL=true; shift ;;
+    --force)    FORCE=true; shift ;;
+    *) shift ;;
+  esac
+done
 
-# ── detect python ─────────────────────────────────────────────────────────────
-need git
-need python3
+if $LIST_ONLY; then
+  echo "Available categories:  mobile  disk  memory  logs  network  artifacts  password  malware  ir  casemgmt  windows  mobile_re  netmon  osint  cloud  reporting  distros"
+  exit 0
+fi
 
-if have python3.11; then PY=python3.11
-elif have python3.12; then PY=python3.12
+# ── prerequisites ──────────────────────────────────────────────────────────────
+have()  { command -v "$1" >/dev/null 2>&1; }
+need()  { have "$1" || { err "Required tool missing: $1"; exit 1; }; }
+need git; need python3
+
+if have python3.12; then PY=python3.12
+elif have python3.11; then PY=python3.11
 elif have python3.10; then PY=python3.10
 else PY=python3; fi
 info "Python: $($PY --version 2>&1)"
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# ── helpers ────────────────────────────────────────────────────────────────────
+# clone  <url>  <rel-dir>
+# Always succeeds — warns on failure but continues
 clone() {
   local url="$1" dir="$2"
   local dest="$TOOLS/$dir"
-  if [[ -d "$dest/.git" ]]; then
-    info "Updating $dir…"
-    git -C "$dest" pull --ff-only 2>/dev/null || warn "Could not update $dir"
-  elif [[ -d "$dest" ]]; then
-    warn "$dest exists but is not a git repo; skipping"
-  else
-    info "Cloning $dir from $url…"
-    git clone --depth 1 "$url" "$dest" || { err "Clone failed: $dir"; return 1; }
+  if [[ -n "$ONLY_CAT" ]] && [[ "$dir" != "${ONLY_CAT}"* ]]; then
+    ((SKIP++)) || true; return 0
   fi
-  ok "$dir"
+  if [[ -d "$dest/.git" ]]; then
+    git -C "$dest" pull --ff-only -q 2>/dev/null && ok "$dir (updated)" || warn "$dir (pull failed, using cached)"
+  else
+    mkdir -p "$(dirname "$dest")"
+    info "Cloning $dir …"
+    if git clone --depth 1 "$url" "$dest" -q 2>>"$LOG"; then
+      ok "$dir"
+    else
+      err "$dir (clone failed — check $LOG for details)"
+    fi
+  fi
 }
 
+# pip_venv  <rel-dir>  [extra-pip-pkgs…]
 pip_venv() {
   local dir="$1"; shift
-  local venv="$TOOLS/$dir/.venv"
+  local dest="$TOOLS/$dir"
+  [[ -d "$dest" ]] || return 0
+  local venv="$dest/.venv"
   if [[ ! -x "$venv/bin/pip" ]]; then
-    "$PY" -m venv "$venv" || { warn "venv failed for $dir"; return; }
+    "$PY" -m venv "$venv" 2>>"$LOG" || { warn "$dir venv creation failed"; return 0; }
   fi
-  "$venv/bin/pip" install -U pip --quiet
-  if [[ -f "$TOOLS/$dir/requirements.txt" ]]; then
-    "$venv/bin/pip" install -r "$TOOLS/$dir/requirements.txt" --quiet || warn "Some deps failed for $dir"
+  "$venv/bin/pip" install -U pip -q 2>>"$LOG" || true
+  if [[ -f "$dest/requirements.txt" ]]; then
+    "$venv/bin/pip" install -r "$dest/requirements.txt" -q 2>>"$LOG" || warn "$dir requirements partially failed"
   fi
   for pkg in "$@"; do
-    "$venv/bin/pip" install "$pkg" --quiet || warn "pip install $pkg failed"
+    "$venv/bin/pip" install "$pkg" -q 2>>"$LOG" || warn "$dir: pip install $pkg failed"
   done
   ok "$dir venv"
+}
+
+# pip_global  <package>
+pip_global() {
+  "$PY" -m pip install "$1" -q 2>>"$LOG" && ok "pip: $1" || warn "pip: $1 failed"
+}
+
+# download_binary  <url>  <dest-file>
+download_bin() {
+  local url="$1" dest="$2"
+  if [[ -f "$dest" ]]; then ok "$dest (cached)"; return 0; fi
+  mkdir -p "$(dirname "$dest")"
+  if have wget; then
+    wget -qO "$dest" "$url" 2>>"$LOG" && chmod +x "$dest" && ok "$(basename "$dest")" || err "download failed: $url"
+  elif have curl; then
+    curl -fsSL "$url" -o "$dest" 2>>"$LOG" && chmod +x "$dest" && ok "$(basename "$dest")" || err "download failed: $url"
+  else
+    err "wget/curl not found — cannot download $(basename "$dest")"
+  fi
+}
+
+# download_zip  <url>  <dest-dir>  [strip-components]
+download_zip() {
+  local url="$1" dest="$2" strip="${3:-0}"
+  mkdir -p "$dest"
+  local tmp
+  tmp=$(mktemp /tmp/fxinst_XXXXXX.zip)
+  if have wget; then wget -qO "$tmp" "$url" 2>>"$LOG"
+  elif have curl; then curl -fsSL "$url" -o "$tmp" 2>>"$LOG"
+  else err "wget/curl required for $(basename "$dest")"; return 1; fi
+  unzip -q "$tmp" -d "$dest" 2>>"$LOG" && ok "$(basename "$dest")" || err "unzip failed: $url"
+  rm -f "$tmp"
+}
+
+# download_tgz  <url>  <dest-dir>  [strip-components]
+download_tgz() {
+  local url="$1" dest="$2" strip="${3:-1}"
+  mkdir -p "$dest"
+  local tmp
+  tmp=$(mktemp /tmp/fxinst_XXXXXX.tar.gz)
+  if have wget; then wget -qO "$tmp" "$url" 2>>"$LOG"
+  elif have curl; then curl -fsSL "$url" -o "$tmp" 2>>"$LOG"
+  else err "wget/curl required for $(basename "$dest")"; return 1; fi
+  tar -xzf "$tmp" -C "$dest" --strip-components="$strip" 2>>"$LOG" && ok "$(basename "$dest")" || err "tar failed: $url"
+  rm -f "$tmp"
 }
 
 apt_pkgs=()
 apt_install() { for pkg in "$@"; do apt_pkgs+=("$pkg"); done; }
 
+BGPIDS=()
+maybe_bg() {
+  if $PARALLEL; then "$@" & BGPIDS+=($!); else "$@"; fi
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
-# MOBILE — Android
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Mobile Forensics (Android) ==="
+head "MOBILE — Android"
 mkdir -p "$TOOLS/mobile"
 
-clone https://github.com/prosch88/ALEX.git              mobile/ALEX
-clone https://github.com/abrignoni/ALEAPP.git            mobile/ALEAPP
-clone https://github.com/RealityNet/android_triage.git   mobile/android_triage
-clone https://github.com/mvt-project/mvt.git             mobile/MVT
-clone https://github.com/den4uk/andriller.git            mobile/Andriller
-clone https://github.com/abrignoni/VLEAPP.git            mobile/VLEAPP
-clone https://github.com/jfarley248/MEAT.git             mobile/AEX
+maybe_bg clone https://github.com/prosch88/ALEX.git               mobile/ALEX
+maybe_bg clone https://github.com/abrignoni/ALEAPP.git             mobile/ALEAPP
+maybe_bg clone https://github.com/RealityNet/android_triage.git    mobile/android_triage
+maybe_bg clone https://github.com/mvt-project/mvt.git              mobile/MVT
+maybe_bg clone https://github.com/den4uk/andriller.git             mobile/Andriller
+maybe_bg clone https://github.com/abrignoni/VLEAPP.git             mobile/VLEAPP
+maybe_bg clone https://github.com/jfarley248/MEAT.git              mobile/MEAT
+maybe_bg clone https://github.com/google/android-forensics.git     mobile/android-forensics 2>/dev/null || true
+maybe_bg clone https://github.com/AndroidForensics/AFLogical-OSE.git mobile/AFLogical 2>/dev/null || true
+$PARALLEL && { wait "${BGPIDS[@]}" 2>/dev/null; BGPIDS=(); }
 
-# Install Python deps for each
-for d in ALEX UFADE ALEAPP MVT Andriller VLEAPP; do
+for d in ALEX ALEAPP MVT Andriller VLEAPP; do
   [[ -d "$TOOLS/mobile/$d" ]] && pip_venv "mobile/$d" || true
 done
 
-apt_install adb android-tools-adb
+# apktool
+APKTOOL="$TOOLS/mobile/apktool/apktool.jar"
+if [[ ! -f "$APKTOOL" ]]; then
+  mkdir -p "$TOOLS/mobile/apktool"
+  download_bin "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar" "$APKTOOL"
+fi
 
-# ── Android RE tools ──────────────────────────────────────────────────────────
-info "Android RE tools…"
 clone https://github.com/pxb1988/dex2jar.git  mobile/dex2jar
 clone https://github.com/skylot/jadx.git       mobile/jadx
 
-# apktool binary
-APKTOOL_DIR="$TOOLS/mobile/apktool"
-mkdir -p "$APKTOOL_DIR"
-if [[ ! -f "$APKTOOL_DIR/apktool.jar" ]]; then
-  APKTOOL_VER="2.9.3"
-  wget -qO "$APKTOOL_DIR/apktool.jar" \
-    "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar" \
-    || warn "apktool download failed; get it manually from https://apktool.org"
-fi
+apt_install adb android-tools-adb
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MOBILE — iOS / Apple
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Mobile Forensics (iOS/Apple) ==="
+head "MOBILE — iOS"
 
-clone https://github.com/prosch88/UFADE.git                  mobile/UFADE
-clone https://github.com/abrignoni/iLEAPP.git                mobile/iLEAPP
-clone https://github.com/abrignoni/RLEAPP.git                mobile/RLEAPP
-clone https://github.com/jsharkey13/iphone_backup_decrypt.git mobile/idevice-backup
+maybe_bg clone https://github.com/prosch88/UFADE.git                   mobile/UFADE
+maybe_bg clone https://github.com/abrignoni/iLEAPP.git                 mobile/iLEAPP
+maybe_bg clone https://github.com/abrignoni/RLEAPP.git                 mobile/RLEAPP
+maybe_bg clone https://github.com/jsharkey13/iphone_backup_decrypt.git mobile/idevice-backup
+$PARALLEL && { wait "${BGPIDS[@]}" 2>/dev/null; BGPIDS=(); }
 
+pip_venv mobile/UFADE
 pip_venv mobile/iLEAPP
 pip_venv mobile/RLEAPP
 apt_install libimobiledevice-utils ifuse usbmuxd
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DISK & IMAGE FORENSICS
+head "SPYWARE & STALKERWARE DETECTION"
+mkdir -p "$TOOLS/spyware"
+
+clone https://github.com/mvt-project/mvt.git              spyware/mvt
+clone https://github.com/AssoEchap/stalkerware-indicators.git spyware/stalkerware-indicators
+clone https://github.com/Te-k/stalkerware-indicators.git  spyware/stalkerware-indicators-tek 2>/dev/null || true
+clone https://github.com/AmnestyTech/investigations.git   spyware/amnesty-investigations
+
+pip_venv spyware/mvt
+
+# Download latest MVT IOC feeds
+MVT_IOCS="$TOOLS/spyware/iocs"
+mkdir -p "$MVT_IOCS"
+download_bin "https://raw.githubusercontent.com/AmnestyTech/investigations/master/2021-07-18_nso/pegasus.stix2" \
+             "$MVT_IOCS/pegasus.stix2" 2>/dev/null || warn "Pegasus IOC download failed (non-fatal)"
+
 # ──────────────────────────────────────────────────────────────────────────────
-info "=== Disk & Image Forensics ==="
+head "DISK & IMAGE FORENSICS"
 mkdir -p "$TOOLS/disk"
 
 clone https://github.com/simsong/bulk_extractor.git  disk/bulk_extractor
 clone https://github.com/sleuthkit/scalpel.git        disk/scalpel
 
 apt_install sleuthkit autopsy foremost testdisk photorec dc3dd ewf-tools \
-            xmount afflib-tools ddrescue guymager hashdeep ssdeep fdupes \
+            xmount afflib-tools ddrescue guymager hashdeep ssdeep \
             gddrescue dcfldd
 
+pip_global dissect 2>/dev/null || true
+clone https://github.com/fox-it/dissect.git  disk/dissect 2>/dev/null || true
+
 # ──────────────────────────────────────────────────────────────────────────────
-# MEMORY FORENSICS
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Memory Forensics ==="
+head "MEMORY FORENSICS"
 mkdir -p "$TOOLS/memory"
 
 clone https://github.com/volatilityfoundation/volatility3.git  memory/volatility3
 clone https://github.com/volatilityfoundation/volatility.git   memory/volatility2
 clone https://github.com/504ensicsLabs/LiME.git                memory/LiME
 clone https://github.com/microsoft/avml.git                    memory/avml
-clone https://github.com/ufrisk/MemProcFS.git                  memory/MemProcFS
 
 pip_venv memory/volatility3
 pip_venv memory/volatility2
 
 # ──────────────────────────────────────────────────────────────────────────────
-# LOG / TIMELINE ANALYSIS
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Log & Timeline Analysis ==="
+head "LOG & TIMELINE ANALYSIS"
 mkdir -p "$TOOLS/logs"
 
-clone https://github.com/log2timeline/plaso.git       logs/plaso
-clone https://github.com/google/timesketch.git        logs/timesketch
-clone https://github.com/SigmaHQ/sigma.git            logs/sigma
-clone https://github.com/JPCERTCC/LogonTracer.git     logs/LogonTracer
-clone https://github.com/tclahr/uac.git               logs/UAC
-clone https://github.com/omerbenamram/evtx.git        logs/evtx
+clone https://github.com/log2timeline/plaso.git    logs/plaso
+clone https://github.com/google/timesketch.git     logs/timesketch
+clone https://github.com/SigmaHQ/sigma.git         logs/sigma
+clone https://github.com/JPCERTCC/LogonTracer.git  logs/LogonTracer
+clone https://github.com/tclahr/uac.git            logs/UAC
+clone https://github.com/omerbenamram/evtx.git     logs/evtx
 
 pip_venv logs/plaso
 pip_venv logs/LogonTracer
 
-# Chainsaw binary (Linux AMD64)
-CHAINSAW_DIR="$TOOLS/logs/chainsaw"
-mkdir -p "$CHAINSAW_DIR"
-if [[ ! -f "$CHAINSAW_DIR/chainsaw" ]]; then
-  CHAINSAW_VER="2.9.0"
-  wget -qO "/tmp/chainsaw.tar.gz" \
-    "https://github.com/WithSecureLabs/chainsaw/releases/download/v${CHAINSAW_VER}/chainsaw_x86_64-unknown-linux-musl.tar.gz" \
-    && tar -xzf /tmp/chainsaw.tar.gz -C "$CHAINSAW_DIR" --strip-components=1 \
-    || warn "Chainsaw download failed; get from https://github.com/WithSecureLabs/chainsaw/releases"
+# Chainsaw
+CHAINSAW="$TOOLS/logs/chainsaw/chainsaw"
+if [[ ! -f "$CHAINSAW" ]]; then
+  download_tgz \
+    "https://github.com/WithSecureLabs/chainsaw/releases/download/v2.9.0/chainsaw_x86_64-unknown-linux-musl.tar.gz" \
+    "$TOOLS/logs/chainsaw" 1 || warn "Chainsaw download failed"
 fi
 
-# Hayabusa binary
-HAYABUSA_DIR="$TOOLS/logs/hayabusa"
-mkdir -p "$HAYABUSA_DIR"
-if [[ ! -f "$HAYABUSA_DIR/hayabusa" ]]; then
-  HAYABUSA_VER="2.17.0"
-  wget -qO "/tmp/hayabusa.zip" \
-    "https://github.com/Yamato-Security/hayabusa/releases/download/v${HAYABUSA_VER}/hayabusa-${HAYABUSA_VER}-linux-x64-musl.zip" \
-    && unzip -q /tmp/hayabusa.zip -d "$HAYABUSA_DIR" \
-    || warn "Hayabusa download failed; get from https://github.com/Yamato-Security/hayabusa/releases"
+# Hayabusa
+HAYABUSA="$TOOLS/logs/hayabusa/hayabusa"
+if [[ ! -f "$HAYABUSA" ]]; then
+  download_zip \
+    "https://github.com/Yamato-Security/hayabusa/releases/download/v2.17.0/hayabusa-2.17.0-linux-x64-musl.zip" \
+    "$TOOLS/logs/hayabusa" || warn "Hayabusa download failed"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# NETWORK FORENSICS
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Network Forensics ==="
+head "NETWORK FORENSICS"
 mkdir -p "$TOOLS/network"
 
 clone https://github.com/iagox86/dnscat2.git  network/dnscat2
-
 apt_install wireshark tshark ngrep tcpdump tcpflow zeek nfdump xplico
 
 # ──────────────────────────────────────────────────────────────────────────────
-# FILE / ARTIFACT ANALYSIS
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Artifact & File Analysis ==="
+head "ARTIFACT & FILE ANALYSIS"
 mkdir -p "$TOOLS/artifacts"
 
-clone https://github.com/keydet89/RegRipper3.0.git        artifacts/regripper
-clone https://github.com/obsidianforensics/hindsight.git  artifacts/hindsight
-clone https://github.com/DidierStevens/DidierStevensSuite.git  artifacts/didier-tools
-clone https://github.com/decalage2/oletools.git           artifacts/oletools
-clone https://github.com/jesparza/peepdf.git              artifacts/peepdf
-clone https://github.com/ReFirmLabs/binwalk.git           artifacts/binwalk
-clone https://github.com/mandiant/flare-floss.git         artifacts/FLOSS
-clone https://github.com/zed-0xff/zsteg.git               artifacts/zsteg
-clone https://github.com/b3dk7/StegExpose.git             artifacts/StegExpose
-clone https://github.com/dfir-orc/dfir-orc.git            artifacts/orc
+clone https://github.com/keydet89/RegRipper3.0.git              artifacts/regripper
+clone https://github.com/obsidianforensics/hindsight.git        artifacts/hindsight
+clone https://github.com/DidierStevens/DidierStevensSuite.git   artifacts/didier-tools
+clone https://github.com/decalage2/oletools.git                 artifacts/oletools
+clone https://github.com/jesparza/peepdf.git                    artifacts/peepdf
+clone https://github.com/ReFirmLabs/binwalk.git                 artifacts/binwalk
+clone https://github.com/mandiant/flare-floss.git               artifacts/FLOSS
+clone https://github.com/dfir-orc/dfir-orc.git                  artifacts/orc
 
 pip_venv artifacts/hindsight
 pip_venv artifacts/oletools
 pip_venv artifacts/binwalk
 pip_venv artifacts/FLOSS
-
-apt_install exiftool libimage-exiftool-perl steghide binutils \
-            libfile-type-perl file
+apt_install exiftool libimage-exiftool-perl steghide binutils file
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PASSWORD & HASH
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Password & Hash Analysis ==="
+head "PASSWORD & HASH ANALYSIS"
 apt_install hashcat john fcrackzip pdfcrack
-
 clone https://github.com/psypanda/hashID.git  password/hashid
-"$PY" -m pip install hashid --quiet || true
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MALWARE / REVERSE ENGINEERING
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Malware Analysis & Reverse Engineering ==="
+head "MALWARE & REVERSE ENGINEERING"
 mkdir -p "$TOOLS/malware"
 
-clone https://github.com/radareorg/radare2.git     malware/radare2
-clone https://github.com/mandiant/capa.git         malware/capa
-clone https://github.com/mandiant/speakeasy.git    malware/speakeasy
+clone https://github.com/radareorg/radare2.git      malware/radare2
+clone https://github.com/mandiant/capa.git          malware/capa
+clone https://github.com/mandiant/speakeasy.git     malware/speakeasy
 clone https://github.com/horsicq/Detect-It-Easy.git malware/die
 
 pip_venv malware/capa
 pip_venv malware/speakeasy
-
 apt_install yara clamav radare2
 
-# Ghidra — point user to download page (large binary)
-GHIDRA_DIR="$TOOLS/malware/ghidra"
-mkdir -p "$GHIDRA_DIR"
-if [[ ! -f "$GHIDRA_DIR/ghidraRun" ]]; then
-  warn "Ghidra not found at $GHIDRA_DIR."
-  warn "Download from https://ghidra-sre.org and extract to $GHIDRA_DIR"
-fi
+GHIDRA="$TOOLS/malware/ghidra"
+mkdir -p "$GHIDRA"
+[[ -f "$GHIDRA/ghidraRun" ]] || warn "Ghidra: download from https://ghidra-sre.org and extract to $GHIDRA"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# INCIDENT RESPONSE
+head "MOBILE RE (MobSF / androguard / frida)"
+mkdir -p "$TOOLS/mobile_re"
+
+clone https://github.com/MobSF/Mobile-Security-Framework-MobSF.git  mobile_re/MobSF
+clone https://github.com/androguard/androguard.git                   mobile_re/androguard
+clone https://github.com/sensepost/objection.git                     mobile_re/objection
+
+pip_venv mobile_re/androguard
+pip_venv mobile_re/objection
+pip_global frida-tools 2>/dev/null || warn "frida-tools failed (try: pip install frida-tools)"
+
 # ──────────────────────────────────────────────────────────────────────────────
-info "=== Incident Response ==="
+head "INCIDENT RESPONSE"
 mkdir -p "$TOOLS/ir"
 
-clone https://github.com/google/grr.git                       ir/GRR
-clone https://github.com/SekoiaLab/Fastir_Collector.git       ir/fastir
-clone https://github.com/diogo-fernan/ir-rescue.git           ir/ir-rescue
-clone https://github.com/CrowdStrike/forensics.git            ir/crowdstrike-forensics
-clone https://github.com/Velocidex/velociraptor.git           ir/velociraptor
+clone https://github.com/google/grr.git                    ir/GRR
+clone https://github.com/SekoiaLab/Fastir_Collector.git    ir/fastir
+clone https://github.com/diogo-fernan/ir-rescue.git        ir/ir-rescue
+clone https://github.com/CrowdStrike/forensics.git         ir/crowdstrike-forensics
+clone https://github.com/Velocidex/velociraptor.git        ir/velociraptor
+clone https://github.com/Neo23x0/Loki.git                  ir/loki
+clone https://github.com/Invoke-IR/PowerForensics.git      ir/powerforensics
 
+pip_venv ir/loki
 apt_install osquery
 
 # Velociraptor binary
-VR_DIR="$TOOLS/ir/velociraptor-bin"
-mkdir -p "$VR_DIR"
-if [[ ! -f "$VR_DIR/velociraptor" ]]; then
-  VR_VER="0.72.4"
-  wget -qO "$VR_DIR/velociraptor" \
-    "https://github.com/Velocidex/velociraptor/releases/download/v${VR_VER}/velociraptor-v${VR_VER}-linux-amd64" \
-    && chmod +x "$VR_DIR/velociraptor" \
-    || warn "Velociraptor download failed; get from https://github.com/Velocidex/velociraptor/releases"
+VR="$TOOLS/ir/velociraptor-bin/velociraptor"
+download_bin \
+  "https://github.com/Velocidex/velociraptor/releases/download/v0.72.4/velociraptor-v0.72.4-linux-amd64" \
+  "$VR" || warn "Velociraptor download failed"
+
+# ──────────────────────────────────────────────────────────────────────────────
+head "CASE MANAGEMENT (Docker-based)"
+mkdir -p "$TOOLS/case_mgmt"
+
+clone https://github.com/dfir-iris/iris-web.git       case_mgmt/dfir-iris
+clone https://github.com/TheHive-Project/TheHive.git  case_mgmt/TheHive
+clone https://github.com/TheHive-Project/Cortex.git   case_mgmt/Cortex
+
+if have docker; then
+  info "Docker found — DFIR-IRIS and TheHive can be started with 'docker compose up -d'"
+else
+  warn "Docker not found — install Docker to use DFIR-IRIS/TheHive: https://docs.docker.com/get-docker/"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# OSINT
+head "WINDOWS ARTIFACTS (EZ Tools)"
+mkdir -p "$TOOLS/windows/EZTools"
+EZ="$TOOLS/windows/EZTools"
+EZ_BASE="https://f001.backblazeb2.com/file/EricZimmermanTools/net6"
+
+for tool in LECmd PECmd JLECmd MFTCmd RBCmd AppCompatCacheParser AmcacheParser EvtxECmd SrumECmd WxTCmd; do
+  if [[ ! -d "$EZ/$tool" ]]; then
+    mkdir -p "$EZ/$tool"
+    tmp=$(mktemp /tmp/ez_XXXXXX.zip)
+    if have wget; then wget -qO "$tmp" "${EZ_BASE}/${tool}.zip" 2>>"$LOG"
+    elif have curl; then curl -fsSL "${EZ_BASE}/${tool}.zip" -o "$tmp" 2>>"$LOG"; fi
+    unzip -q "$tmp" -d "$EZ/$tool" 2>>"$LOG" && ok "EZTool: $tool" || warn "EZTool: $tool download failed"
+    rm -f "$tmp"
+  else ok "EZTool: $tool (cached)"; fi
+done
+
 # ──────────────────────────────────────────────────────────────────────────────
-info "=== OSINT ==="
+head "NETWORK DETECTION (Suricata / Arkime / Kismet)"
+mkdir -p "$TOOLS/netmon"
+
+clone https://github.com/OISF/suricata.git         netmon/suricata
+clone https://github.com/arkime/arkime.git          netmon/arkime
+clone https://github.com/kismetwireless/kismet.git  netmon/kismet
+
+apt_install suricata snort tshark
+
+# ──────────────────────────────────────────────────────────────────────────────
+head "OSINT"
 mkdir -p "$TOOLS/osint"
 
-clone https://github.com/smicallef/spiderfoot.git        osint/spiderfoot
-clone https://github.com/laramies/theHarvester.git       osint/theHarvester
-clone https://github.com/sherlock-project/sherlock.git   osint/sherlock
-clone https://github.com/lanmaster53/recon-ng.git        osint/recon-ng
-clone https://github.com/lockfale/osint-framework.git    osint/osint-framework
-clone https://github.com/s0md3v/Photon.git               osint/Photon
+clone https://github.com/smicallef/spiderfoot.git      osint/spiderfoot
+clone https://github.com/laramies/theHarvester.git     osint/theHarvester
+clone https://github.com/sherlock-project/sherlock.git osint/sherlock
+clone https://github.com/lanmaster53/recon-ng.git      osint/recon-ng
+clone https://github.com/s0md3v/Photon.git             osint/Photon
 
 for d in spiderfoot theHarvester sherlock recon-ng Photon; do
   pip_venv "osint/$d"
 done
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CLOUD & CONTAINER
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Cloud & Container Forensics ==="
+head "CLOUD & CONTAINER"
 mkdir -p "$TOOLS/cloud"
 
-clone https://github.com/google/docker-explorer.git   cloud/docker-explorer
-clone https://github.com/ThreatResponse/aws_ir.git    cloud/aws-ir
-clone https://github.com/RhinoSecurityLabs/pacu.git   cloud/pacu
+clone https://github.com/google/docker-explorer.git  cloud/docker-explorer
+clone https://github.com/ThreatResponse/aws_ir.git   cloud/aws-ir
+clone https://github.com/RhinoSecurityLabs/pacu.git  cloud/pacu
 
 pip_venv cloud/docker-explorer
 pip_venv cloud/aws-ir
 pip_venv cloud/pacu
 
-# Trufflehog binary
-TH_DIR="$TOOLS/cloud/trufflehog"
-mkdir -p "$TH_DIR"
-if [[ ! -f "$TH_DIR/trufflehog" ]]; then
-  TH_VER="3.82.6"
-  wget -qO "/tmp/trufflehog.tar.gz" \
-    "https://github.com/trufflesecurity/trufflehog/releases/download/v${TH_VER}/trufflehog_${TH_VER}_linux_amd64.tar.gz" \
-    && tar -xzf /tmp/trufflehog.tar.gz -C "$TH_DIR" trufflehog \
-    && chmod +x "$TH_DIR/trufflehog" \
-    || warn "Trufflehog download failed"
-fi
+TH="$TOOLS/cloud/trufflehog/trufflehog"
+download_tgz \
+  "https://github.com/trufflesecurity/trufflehog/releases/download/v3.82.6/trufflehog_3.82.6_linux_amd64.tar.gz" \
+  "$TOOLS/cloud/trufflehog" 0 || warn "Trufflehog download failed"
+[[ -f "$TOOLS/cloud/trufflehog/trufflehog" ]] && chmod +x "$TOOLS/cloud/trufflehog/trufflehog"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# REPORTING
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Reporting & Utilities ==="
+head "REPORTING"
 mkdir -p "$TOOLS/reporting"
 
-clone https://github.com/libyal/dfimagetools.git        reporting/dfimagetools
-clone https://github.com/log2timeline/dfvfs.git         reporting/dfvfs
-clone https://github.com/certsocietegenerale/timeline-lab.git  reporting/timeline_lab
+clone https://github.com/libyal/dfimagetools.git              reporting/dfimagetools
+clone https://github.com/log2timeline/dfvfs.git               reporting/dfvfs
+clone https://github.com/certsocietegenerale/timeline-lab.git reporting/timeline_lab
 
 pip_venv reporting/dfvfs
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CASE MANAGEMENT / DFIR PLATFORMS
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Case Management & DFIR Platforms ==="
-mkdir -p "$TOOLS/case_mgmt"
-
-clone https://github.com/dfir-iris/iris-web.git          case_mgmt/dfir-iris
-clone https://github.com/TheHive-Project/TheHive.git     case_mgmt/TheHive
-clone https://github.com/TheHive-Project/Cortex.git      case_mgmt/Cortex
-clone https://github.com/MISP/MISP.git                   case_mgmt/MISP
-clone https://github.com/OpenCTI-Platform/opencti.git    case_mgmt/OpenCTI
-
-info "Note: DFIR-IRIS, TheHive, Cortex, MISP, OpenCTI require Docker."
-info "Run: docker compose up -d  inside the respective tool directory."
-
-# ──────────────────────────────────────────────────────────────────────────────
-# WINDOWS ARTIFACT ANALYSIS (Eric Zimmermann Tools)
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Windows Artifacts (EZ Tools) ==="
-mkdir -p "$TOOLS/windows"
-
-EZ_BASE="https://f001.backblazeb2.com/file/EricZimmermanTools/net6"
-EZ_DIR="$TOOLS/windows/EZTools"
-mkdir -p "$EZ_DIR"
-
-for tool in LECmd PECmd JLECmd MFTCmd RBCmd AppCompatCacheParser AmcacheParser \
-            EvtxECmd SrumECmd WxTCmd SBECmd; do
-  if [[ ! -f "$EZ_DIR/${tool}" ]] && [[ ! -f "$EZ_DIR/${tool}.exe" ]]; then
-    wget -qO "/tmp/${tool}.zip" \
-      "${EZ_BASE}/${tool}.zip" \
-      && unzip -q "/tmp/${tool}.zip" -d "$EZ_DIR/${tool}/" \
-      || warn "EZ Tool ${tool} download failed; get from https://ericzimmerman.github.io/#!index.md"
-  fi
-done
-
-clone https://github.com/EricZimmermann/KAPE.git              windows/KAPE 2>/dev/null || \
-  info "KAPE: get binary from https://www.kroll.com/kape (not on GitHub)"
-clone https://github.com/sans-dfir/sift-files.git             windows/sift-cli
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ANDROID MALWARE ANALYSIS (MobSF / androguard / frida)
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Mobile App Analysis ==="
-mkdir -p "$TOOLS/mobile_re"
-
-clone https://github.com/MobSF/Mobile-Security-Framework-MobSF.git  mobile_re/MobSF
-clone https://github.com/androguard/androguard.git                   mobile_re/androguard
-clone https://github.com/frida/frida.git                             mobile_re/frida-src
-clone https://github.com/sensepost/objection.git                     mobile_re/objection
-
-pip_venv mobile_re/androguard
-pip_venv mobile_re/objection
-
-# frida-tools via pip (binaries available via pip)
-"$PY" -m pip install frida-tools --quiet 2>/dev/null || warn "frida-tools pip install failed; try: pip install frida-tools"
-
-# ──────────────────────────────────────────────────────────────────────────────
-# NETWORK DETECTION (Suricata / Snort / Zeek / Arkime / Kismet)
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Network Detection & Monitoring ==="
-mkdir -p "$TOOLS/netmon"
-
-clone https://github.com/OISF/suricata.git            netmon/suricata
-clone https://github.com/arkime/arkime.git            netmon/arkime
-clone https://github.com/kismetwireless/kismet.git    netmon/kismet
-
-apt_install suricata snort zeek kismet tshark
-
-# ──────────────────────────────────────────────────────────────────────────────
-# SANDBOX / MALWARE DYNAMIC ANALYSIS
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Dynamic Malware Analysis ==="
-mkdir -p "$TOOLS/sandbox"
-
-clone https://github.com/cuckoosandbox/cuckoo.git     sandbox/cuckoo
-clone https://github.com/cuckoosandbox/community.git  sandbox/cuckoo-community
-
-info "Cuckoo requires VirtualBox + configuration; see https://cuckoo.sh/docs/installation/"
-
-# ──────────────────────────────────────────────────────────────────────────────
-# DISSECT (Fox-IT)
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Dissect (Fox-IT) ==="
-"$PY" -m pip install dissect --quiet 2>/dev/null || warn "dissect pip install failed"
-clone https://github.com/fox-it/dissect.git  artifacts/dissect 2>/dev/null || true
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ADDITIONAL IR TOOLS
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Additional IR Tools ==="
-
-clone https://github.com/Neo23x0/Loki.git         ir/loki
-clone https://github.com/cyb3rfox/Aurora-Incident-Response.git  ir/aurora
-clone https://github.com/Invoke-IR/PowerForensics.git  ir/powerforensics
-clone https://github.com/pentestmonkey/unix-privesc-check.git   ir/unix-privesc
-
-pip_venv ir/loki
-
-# ──────────────────────────────────────────────────────────────────────────────
-# FORENSIC DISTRO TOOLKITS (reference scripts)
-# ──────────────────────────────────────────────────────────────────────────────
-info "=== Forensic Distro Tools ==="
-mkdir -p "$TOOLS/distros"
-
-clone https://github.com/sans-dfir/sift-saltstack.git   distros/sift-saltstack
-clone https://github.com/teamdfir/sift-cli.git          distros/sift-cli
-
-info "SIFT: Run SIFT CLI to install the full SIFT workstation: https://github.com/teamdfir/sift-cli"
-info "CAINE / PALADIN / TSURUGI are bootable ISO distributions — see their respective websites."
-
-# ──────────────────────────────────────────────────────────────────────────────
-# APT BATCH INSTALL
-# ──────────────────────────────────────────────────────────────────────────────
+head "APT BATCH INSTALL"
 if [[ ${#apt_pkgs[@]} -gt 0 ]]; then
-  info "=== Installing apt packages ==="
-  # De-duplicate
   mapfile -t apt_pkgs < <(printf '%s\n' "${apt_pkgs[@]}" | sort -u)
-  info "Packages: ${apt_pkgs[*]}"
+  info "Installing ${#apt_pkgs[@]} apt packages…"
   if have apt-get; then
     sudo apt-get update -qq 2>/dev/null || warn "apt-get update failed"
-    sudo apt-get install -y "${apt_pkgs[@]}" 2>/dev/null || warn "Some apt packages failed; install manually"
-    ok "apt packages"
+    # Install each package individually so one failure doesn't block others
+    for pkg in "${apt_pkgs[@]}"; do
+      sudo apt-get install -y "$pkg" -qq 2>>"$LOG" && ok "apt: $pkg" || warn "apt: $pkg failed (may need manual install)"
+    done
   else
-    warn "apt-get not available; install manually: ${apt_pkgs[*]}"
+    warn "apt-get not found — install manually: ${apt_pkgs[*]}"
   fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-info "=== Install complete ==="
-info "Tools directory: $TOOLS"
-info "Log: $LOG"
+head "SUMMARY"
+TOTAL=$((PASS + FAIL + SKIP))
 echo
-echo "  Start the hub:  python3 -m forensicx_hub"
-echo "  Or via CLI:     forensicx hub"
+echo -e "  ${GREEN}✓ Passed:${NC}  $PASS"
+echo -e "  ${RED}✗ Failed:${NC}  $FAIL"
+echo -e "  ${YELLOW}⊘ Skipped:${NC} $SKIP"
+echo -e "  Total:      $TOTAL"
 echo
+echo -e "  Full log:   ${CYAN}$LOG${NC}"
+echo -e "  Tools dir:  ${CYAN}$TOOLS${NC}"
+echo
+echo "  Start hub:  ${BOLD}forensicx web${NC}   or   ${BOLD}python3 -m forensicx_hub${NC}"
+echo
+
+if [[ $FAIL -gt 0 ]]; then
+  echo -e "  ${YELLOW}Some tools failed to install. This is normal — network issues, missing"
+  echo -e "  system libraries, or platform restrictions. Re-run to retry failed tools."
+  echo -e "  The hub works fully with whichever tools succeeded.${NC}"
+fi

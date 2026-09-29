@@ -40,6 +40,39 @@ def _broadcast(event: str, data: dict) -> None:
         for q in dead:
             _sse_listeners.remove(q)
 
+# ── Auto-scan state ────────────────────────────────────────────────────────────
+_auto_scan_enabled: bool = False
+_cases_dir: Path = ROOT / "cases"
+_active_scans: dict[str, str] = {}  # serial → status
+
+def _auto_scan_on_attach(device: Any) -> None:
+    if not _auto_scan_enabled:
+        return
+    if device.serial in _active_scans:
+        return
+    if not device.is_ready:
+        return
+    _active_scans[device.serial] = "running"
+    _broadcast("auto_scan_started", {
+        "serial": device.serial, "model": device.model,
+        "manufacturer": device.manufacturer,
+    })
+    def run():
+        try:
+            from forensicx_hub.workflow import comprehensive_android_scan
+            _cases_dir.mkdir(parents=True, exist_ok=True)
+            report_path = ""
+            for step, msg in comprehensive_android_scan(device.serial, _cases_dir):
+                _broadcast("triage_log", {"step": step, "msg": msg, "serial": device.serial})
+                if step == "report" and "forensicx_report.html" in msg:
+                    report_path = msg.split("✓ Report: ")[-1].strip()
+            _active_scans[device.serial] = "done"
+            _broadcast("triage_done", {"serial": device.serial, "report": report_path})
+        except Exception as exc:
+            _active_scans.pop(device.serial, None)
+            _broadcast("triage_log", {"step": "error", "msg": str(exc), "serial": device.serial})
+    threading.Thread(target=run, daemon=True).start()
+
 # ── Device monitor ─────────────────────────────────────────────────────────────
 _device_monitor = None
 
@@ -48,11 +81,11 @@ def _start_monitor() -> None:
     try:
         from forensicx_hub.device_monitor import DeviceMonitor
         _device_monitor = DeviceMonitor(interval=4.0)
-        _device_monitor.on_attach(lambda d: _broadcast("device_attach", {
+        _device_monitor.on_attach(lambda d: (_broadcast("device_attach", {
             "serial": d.serial, "model": d.model,
             "manufacturer": d.manufacturer, "android": d.android_version,
             "state": d.state
-        }))
+        }), _auto_scan_on_attach(d)))
         _device_monitor.on_detach(lambda s: _broadcast("device_detach", {"serial": s}))
         _device_monitor.start()
     except Exception:
@@ -203,21 +236,120 @@ def api_devices() -> Response:
                 for d in _device_monitor.devices]
     return jsonify(devs)
 
-@app.route("/api/triage/android", methods=["POST"])
-def api_triage_android() -> Response:
+@app.route("/api/autoscan", methods=["GET", "POST"])
+def api_autoscan() -> Response:
+    global _auto_scan_enabled, _cases_dir
+    if request.method == "POST":
+        body = request.get_json(force=True) or {}
+        _auto_scan_enabled = bool(body.get("enabled", False))
+        if "cases_dir" in body:
+            _cases_dir = Path(body["cases_dir"])
+        return jsonify({"enabled": _auto_scan_enabled, "cases_dir": str(_cases_dir)})
+    return jsonify({"enabled": _auto_scan_enabled, "cases_dir": str(_cases_dir)})
+
+@app.route("/api/browse")
+def api_browse() -> Response:
+    path_str = request.args.get("path", str(_cases_dir))
+    try:
+        p = Path(path_str).expanduser().resolve()
+        if not p.exists():
+            return jsonify({"error": "Path does not exist", "path": str(p)}), 404
+        if p.is_file():
+            size = p.stat().st_size
+            content = None
+            if size < 200_000 and p.suffix.lower() in (".txt", ".json", ".log", ".csv", ".xml", ".html"):
+                try:
+                    content = p.read_text(errors="replace")
+                except Exception:
+                    pass
+            return jsonify({
+                "type": "file", "name": p.name, "path": str(p),
+                "size": size, "content": content,
+                "parent": str(p.parent),
+            })
+        items = []
+        for entry in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower())):
+            try:
+                stat = entry.stat()
+                items.append({
+                    "name": entry.name,
+                    "path": str(entry),
+                    "type": "dir" if entry.is_dir() else "file",
+                    "size": stat.st_size if entry.is_file() else 0,
+                    "mtime": stat.st_mtime,
+                })
+            except OSError:
+                pass
+        return jsonify({
+            "type": "dir", "path": str(p), "name": p.name,
+            "parent": str(p.parent) if p.parent != p else None,
+            "items": items,
+        })
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+@app.route("/api/open-report", methods=["POST"])
+def api_open_report() -> Response:
+    body = request.get_json(force=True) or {}
+    report_path = body.get("path", "")
+    if report_path and Path(report_path).exists():
+        import webbrowser
+        webbrowser.open(f"file://{report_path}")
+        return jsonify({"status": "opened"})
+    return jsonify({"error": "File not found"}), 404
+
+@app.route("/api/scans")
+def api_scans() -> Response:
+    return jsonify(_active_scans)
+
+@app.route("/api/triage/spyware", methods=["POST"])
+def api_spyware_scan() -> Response:
     body = request.get_json(force=True) or {}
     serial = body.get("serial", "")
-    case_dir = Path(body.get("case_dir", str(ROOT / "cases")))
+    case_dir = Path(body.get("case_dir", str(_cases_dir)))
     if not serial:
         return jsonify({"error": "serial required"}), 400
 
     def run():
         try:
-            from forensicx_hub.workflow import android_triage_workflow
-            for step, msg in android_triage_workflow(serial=serial, case_dir=case_dir):
+            from forensicx_hub.workflow import quick_spyware_scan
+            for step, msg in quick_spyware_scan(serial=serial, case_dir=case_dir):
                 _broadcast("triage_log", {"step": step, "msg": msg, "serial": serial})
             _broadcast("triage_done", {"serial": serial})
         except Exception as exc:
+            _broadcast("triage_log", {"step": "error", "msg": str(exc), "serial": serial})
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"status": "started", "serial": serial})
+
+@app.route("/api/triage/android", methods=["POST"])
+def api_triage_android() -> Response:
+    body = request.get_json(force=True) or {}
+    serial = body.get("serial", "")
+    case_dir = Path(body.get("case_dir", str(_cases_dir)))
+    if not serial:
+        return jsonify({"error": "serial required"}), 400
+    _active_scans[serial] = "running"
+
+    def run():
+        try:
+            from forensicx_hub.workflow import comprehensive_android_scan
+            case_dir.mkdir(parents=True, exist_ok=True)
+            report_path = ""
+            for step, msg in comprehensive_android_scan(
+                    serial=serial, case_dir=case_dir,
+                    run_alex=body.get("run_alex", True),
+                    run_triage=body.get("run_triage", True),
+                    run_aleapp=body.get("run_aleapp", True),
+                    run_mvt=body.get("run_mvt", True),
+                    run_spyware=body.get("run_spyware", True)):
+                _broadcast("triage_log", {"step": step, "msg": msg, "serial": serial})
+                if step == "report" and "forensicx_report.html" in msg:
+                    report_path = msg.split("✓ Report: ")[-1].strip()
+            _active_scans[serial] = "done"
+            _broadcast("triage_done", {"serial": serial, "report": report_path, "case_dir": str(case_dir)})
+        except Exception as exc:
+            _active_scans.pop(serial, None)
             _broadcast("triage_log", {"step": "error", "msg": str(exc), "serial": serial})
 
     threading.Thread(target=run, daemon=True).start()
@@ -519,6 +651,12 @@ textarea{resize:vertical;min-height:80px}
 /* ── Donut chart wrapper ──────────────────────────────────────────────────────── */
 .chart-wrap{position:relative;height:200px;display:flex;align-items:center;justify-content:center}
 
+/* ── Scan module options ──────────────────────────────────────────────────────── */
+.opt-label{display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);font-size:13px;padding:4px 0}
+.opt-label input[type=checkbox]{width:auto;accent-color:var(--blue);cursor:pointer;width:15px;height:15px}
+.opt-name{font-weight:600;min-width:110px;color:var(--text)}
+.opt-desc{color:var(--text3);font-size:12px}
+
 /* ── RESPONSIVE ────────────────────────────────────────────────────────────────── */
 @media(max-width:900px){
   :root{--sidebar-w:54px}
@@ -576,6 +714,9 @@ textarea{resize:vertical;min-height:80px}
   </div>
   <div class="nav-item" data-page="memory">
     <i class="fas fa-microchip nav-icon"></i><span>Memory Analysis</span>
+  </div>
+  <div class="nav-item" data-page="browser">
+    <i class="fas fa-folder-tree nav-icon"></i><span>File Browser</span>
   </div>
   <div class="nav-section">Arsenal</div>
   <div class="nav-item" data-page="tools">
@@ -768,57 +909,130 @@ textarea{resize:vertical;min-height:80px}
       <div class="icon" style="background:linear-gradient(135deg,var(--blue),var(--purple))"><i class="fas fa-mobile-screen"></i></div>
       Live Device Triage
     </div>
-    <button class="btn btn-ghost btn-sm" onclick="loadDevices()"><i class="fas fa-rotate"></i> Refresh</button>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px">
+        <label style="font-size:12px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:6px;margin:0">
+          <input type="checkbox" id="auto-scan-toggle" onchange="toggleAutoScan()" style="width:auto;cursor:pointer">
+          <span>Auto-scan on plug-in</span>
+        </label>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="loadDevices()"><i class="fas fa-rotate"></i> Refresh</button>
+    </div>
   </div>
-  <div class="coc-strip"><i class="fas fa-lock" style="color:var(--blue)"></i> Use only on devices you are authorized to examine. Acquisition is logged with timestamps and operator info.</div>
+  <div class="coc-strip"><i class="fas fa-lock" style="color:var(--blue)"></i> Use only on devices you are authorized to examine. All acquisitions are timestamped and logged.</div>
+
+  <!-- Auto-scan banner -->
+  <div id="auto-scan-banner" style="display:none;background:linear-gradient(90deg,rgba(16,185,129,.1),rgba(59,130,246,.1));border:1px solid rgba(16,185,129,.3);border-radius:8px;padding:12px 16px;margin-bottom:16px;display:none;align-items:center;gap:12px">
+    <div style="width:10px;height:10px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 1.5s infinite"></div>
+    <span id="auto-scan-msg" style="font-size:13px;color:var(--green)">Auto-scan active — plug in a phone to start automatically</span>
+  </div>
 
   <div class="grid-2 mb-16">
     <div class="card">
-      <div class="card-head"><h3><i class="fas fa-mobile" style="color:var(--cyan)"></i> ADB Devices</h3><span class="badge badge-green">Live</span></div>
+      <div class="card-head">
+        <h3><i class="fas fa-mobile" style="color:var(--cyan)"></i> Connected Devices</h3>
+        <span class="badge badge-green" style="display:flex;align-items:center;gap:5px">
+          <span style="width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite"></span>Live
+        </span>
+      </div>
       <div class="card-body" id="device-list-panel">
-        <div class="text-muted text-sm">Scanning for ADB devices…</div>
+        <div class="text-muted text-sm">Scanning for devices…</div>
       </div>
     </div>
     <div class="card">
-      <div class="card-head"><h3><i class="fas fa-sliders" style="color:var(--purple)"></i> Triage Options</h3></div>
+      <div class="card-head"><h3><i class="fas fa-sliders" style="color:var(--purple)"></i> Scan Options</h3></div>
       <div class="card-body">
         <div class="field">
           <label>Output Directory</label>
           <input type="text" id="triage-case-dir" value="./cases">
         </div>
-        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text)">
-            <input type="checkbox" id="opt-alex" checked style="width:auto"> ALEX — Logical extraction
-          </label>
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text)">
-            <input type="checkbox" id="opt-triage" checked style="width:auto"> android_triage — System artifacts
-          </label>
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text)">
-            <input type="checkbox" id="opt-aleapp" checked style="width:auto"> ALEAPP — Artifact parsing
-          </label>
+        <div style="margin-bottom:12px">
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--text3);margin-bottom:8px">Scan Modules</div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label class="opt-label"><input type="checkbox" id="opt-alex" checked> <span class="opt-name">ALEX</span> <span class="opt-desc">Logical extraction</span></label>
+            <label class="opt-label"><input type="checkbox" id="opt-triage" checked> <span class="opt-name">android_triage</span> <span class="opt-desc">System artifacts</span></label>
+            <label class="opt-label"><input type="checkbox" id="opt-aleapp" checked> <span class="opt-name">ALEAPP</span> <span class="opt-desc">Artifact parser</span></label>
+            <label class="opt-label"><input type="checkbox" id="opt-mvt" checked> <span class="opt-name">MVT</span> <span class="opt-desc">Spyware / Pegasus detection</span></label>
+            <label class="opt-label"><input type="checkbox" id="opt-spyware" checked> <span class="opt-name">Stalkerware</span> <span class="opt-desc">Known indicator check</span></label>
+          </div>
         </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn btn-success" id="btn-android-triage" onclick="startAndroidTriage()" disabled>
-            <i class="fas fa-play"></i> Start Android Triage
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <button class="btn btn-success" id="btn-android-triage" onclick="startAndroidTriage()" disabled style="flex:1">
+            <i class="fas fa-android"></i> Full Android Scan
           </button>
-          <button class="btn btn-primary" onclick="startIosTriage()">
-            <i class="fab fa-apple"></i> iOS Triage
+          <button class="btn btn-primary" id="btn-ios-triage" onclick="startIosTriage()" style="flex:1">
+            <i class="fab fa-apple"></i> Full iOS Scan
+          </button>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+          <button class="btn btn-ghost" id="btn-spyware" onclick="startSpywareScan()" disabled style="flex:1">
+            <i class="fas fa-bug"></i> Quick Spyware Scan
           </button>
         </div>
       </div>
     </div>
   </div>
 
+  <!-- Progress steps -->
+  <div class="card mb-16" id="scan-progress-card" style="display:none">
+    <div class="card-head">
+      <h3><i class="fas fa-circle-notch fa-spin" style="color:var(--blue)"></i> Scan in Progress</h3>
+      <span id="scan-pct" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3)">0%</span>
+    </div>
+    <div class="card-body" style="padding:12px 18px">
+      <div class="progress-wrap"><div class="progress-bar" id="scan-progress-bar" style="width:0%"></div></div>
+      <div id="scan-steps" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px"></div>
+    </div>
+  </div>
+
   <div class="card">
     <div class="card-head">
-      <h3><i class="fas fa-terminal" style="color:var(--green)"></i> Triage Output</h3>
-      <div style="display:flex;gap:6px">
+      <h3><i class="fas fa-terminal" style="color:var(--green)"></i> Scan Output</h3>
+      <div style="display:flex;gap:6px;align-items:center">
         <span id="triage-status" class="badge badge-gray">Idle</span>
+        <button class="btn btn-ghost btn-sm" id="btn-open-report" onclick="openLastReport()" style="display:none">
+          <i class="fas fa-file-code"></i> Open Report
+        </button>
+        <button class="btn btn-ghost btn-sm" onclick="nav('browser')"><i class="fas fa-folder-open"></i> Browse Files</button>
         <button class="btn btn-ghost btn-sm" onclick="clearTriageLog()">Clear</button>
       </div>
     </div>
     <div class="card-body" style="padding:12px">
-      <div id="triage-log" class="log-box"></div>
+      <div id="triage-log" class="log-box" style="height:360px"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── FILE BROWSER PAGE ──────────────────────────────────────────────────── -->
+<section class="page" id="page-browser">
+  <div class="page-head">
+    <div class="page-title">
+      <div class="icon" style="background:linear-gradient(135deg,var(--amber),#f97316)"><i class="fas fa-folder-open"></i></div>
+      Evidence File Browser
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="browseHome()"><i class="fas fa-home"></i> Cases Dir</button>
+  </div>
+  <div class="card mb-16">
+    <div class="card-body" style="padding:10px 14px">
+      <div style="display:flex;gap:8px">
+        <input type="text" id="browse-path" value="./cases" style="flex:1;font-family:'JetBrains Mono',monospace;font-size:12px" onkeydown="if(event.key==='Enter')browsePath()">
+        <button class="btn btn-primary" onclick="browsePath()"><i class="fas fa-arrow-right"></i> Go</button>
+        <button class="btn btn-ghost" onclick="browseParent()"><i class="fas fa-arrow-up"></i> Up</button>
+      </div>
+    </div>
+  </div>
+  <div class="grid-2" style="grid-template-columns:320px 1fr;height:calc(100vh - 240px)">
+    <div class="card" style="overflow-y:auto">
+      <div class="card-head"><h3><i class="fas fa-sitemap" style="color:var(--amber)"></i> Directory</h3></div>
+      <div id="file-list" style="padding:8px"></div>
+    </div>
+    <div class="card" style="overflow:hidden;display:flex;flex-direction:column">
+      <div class="card-head"><h3 id="preview-fname"><i class="fas fa-file"></i> File Preview</h3>
+        <button class="btn btn-ghost btn-sm" id="btn-dl" onclick="downloadFile()" style="display:none"><i class="fas fa-download"></i> Download</button>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:14px">
+        <div id="file-preview" style="color:var(--text3);font-size:13px">Select a file to preview</div>
+      </div>
     </div>
   </div>
 </section>
@@ -1061,6 +1275,7 @@ function nav(page) {
   if(page==='evidence') loadEvidence();
   if(page==='devices')  loadDevices();
   if(page==='reports')  loadReportCases();
+  if(page==='browser')  browseHome();
 }
 document.querySelectorAll('.nav-item').forEach(item => {
   item.addEventListener('click', () => nav(item.dataset.page));
@@ -1240,6 +1455,7 @@ async function loadDevices() {
 function selectDevice(serial, name) {
   selectedSerial = serial;
   $('btn-android-triage').disabled = false;
+  $('btn-spyware').disabled = false;
   document.querySelectorAll('.device-card').forEach(c => { c.classList.toggle('selected', c.onclick.toString().includes(`'${serial}'`)); });
   toast(`Selected: ${name}`, 'info');
 }
@@ -1255,7 +1471,12 @@ async function startAndroidTriage() {
     run_alex: $('opt-alex').checked,
     run_triage: $('opt-triage').checked,
     run_aleapp: $('opt-aleapp').checked,
+    run_mvt: $('opt-mvt').checked,
+    run_spyware: $('opt-spyware').checked,
   };
+  $('scan-progress-card').style.display = 'block';
+  $('scan-progress-bar').style.width = '5%';
+  $('scan-pct').textContent = '5%';
   const r = await fetch('/api/triage/android', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   if(!r.ok) toast('Failed to start triage', 'error');
 }
@@ -1274,6 +1495,134 @@ function addTriageLog(step, msg, cls='info') {
   box.scrollTop = box.scrollHeight;
 }
 function clearTriageLog() { $('triage-log').innerHTML=''; $('triage-status').className='badge badge-gray'; $('triage-status').textContent='Idle'; }
+
+// ── Auto-scan toggle ──────────────────────────────────────────────────────────
+async function toggleAutoScan() {
+  const enabled = $('auto-scan-toggle').checked;
+  await fetch('/api/autoscan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
+  const banner = $('auto-scan-banner');
+  banner.style.display = enabled ? 'flex' : 'none';
+  if(enabled) {
+    toast('Auto-scan enabled — plug in a phone to start automatically', 'success');
+    $('auto-scan-msg').textContent = 'Auto-scan active — plug in a phone to start automatically';
+  } else {
+    toast('Auto-scan disabled', 'info');
+  }
+}
+
+// ── Quick Spyware Scan ────────────────────────────────────────────────────────
+async function startSpywareScan() {
+  if(!selectedSerial){ toast('Select a device first','error'); return; }
+  $('triage-status').className='badge badge-amber'; $('triage-status').textContent='Spyware Scan';
+  addTriageLog('spyware', `Starting quick spyware scan on ${selectedSerial}…`, 'info');
+  await fetch('/api/triage/spyware', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({serial: selectedSerial, case_dir: $('triage-case-dir').value})});
+}
+
+// ── Open last report ──────────────────────────────────────────────────────────
+let _lastReportPath = null;
+async function openLastReport() {
+  if(!_lastReportPath){ toast('No report available yet', 'error'); return; }
+  const r = await fetch('/api/open-report', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({path: _lastReportPath})});
+  if(r.ok) toast('Report opened in browser', 'success');
+  else toast('Could not open report', 'error');
+}
+
+// ── File Browser ──────────────────────────────────────────────────────────────
+let _browseHistory = [];
+let _currentBrowsePath = null;
+let _downloadTarget = null;
+
+async function browseHome() {
+  const r = await fetch('/api/autoscan'); const d = await r.json();
+  browsePath(d.cases_dir || './cases');
+}
+function browseParent() {
+  if(!_currentBrowsePath) return;
+  // ask server for parent from last browse result
+  const input = $('browse-path');
+  const parts = _currentBrowsePath.replace(/\\/g,'/').split('/');
+  parts.pop();
+  browsePath(parts.join('/') || '/');
+}
+async function browsePath(path) {
+  const p = path !== undefined ? path : $('browse-path').value.trim();
+  if(!p) return;
+  nav('browser');
+  $('browse-path').value = p;
+  try {
+    const r = await fetch(`/api/browse?path=${encodeURIComponent(p)}`);
+    const d = await r.json();
+    if(d.error){ toast(d.error,'error'); return; }
+    _currentBrowsePath = d.path;
+    $('browse-path').value = d.path;
+    if(d.type === 'dir') {
+      renderFileList(d);
+      $('file-preview').innerHTML = `<div class="text-muted text-sm">📂 ${d.items.length} items in <span class="mono">${d.path}</span></div>`;
+      $('preview-fname').innerHTML = '<i class="fas fa-folder"></i> Directory';
+      $('btn-dl').style.display = 'none';
+      _downloadTarget = null;
+    } else {
+      previewFile(d);
+    }
+  } catch(e) { toast('Browse error: '+e,'error'); }
+}
+function renderFileList(dir) {
+  const list = $('file-list');
+  const rows = dir.items.map(item => {
+    const icon = item.type==='dir' ? 'fa-folder' : getFileIcon(item.name);
+    const size = item.type==='file' ? fmtSize(item.size) : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:5px;cursor:pointer;transition:.15s"
+              onmouseover="this.style.background='var(--surface3)'" onmouseout="this.style.background=''"
+              onclick="browsePath('${item.path.replace(/'/g,"\\'")}')">
+              <i class="fas ${icon}" style="color:${item.type==='dir'?'var(--amber)':'var(--blue-l)'};width:16px;text-align:center"></i>
+              <span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.name}</span>
+              <span class="text-xs text-muted">${size}</span>
+            </div>`;
+  }).join('');
+  list.innerHTML = rows || '<div class="text-muted text-sm" style="padding:8px">Empty directory</div>';
+}
+function previewFile(d) {
+  $('preview-fname').innerHTML = `<i class="fas ${getFileIcon(d.name)}"></i> ${d.name}`;
+  _downloadTarget = d.path;
+  $('btn-dl').style.display = '';
+  const prev = $('file-preview');
+  if(d.content !== null && d.content !== undefined) {
+    const escaped = d.content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    prev.innerHTML = `<pre style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text2);white-space:pre-wrap;word-break:break-word">${escaped}</pre>`;
+  } else {
+    const ext = d.name.split('.').pop().toLowerCase();
+    const isImg = ['png','jpg','jpeg','gif','bmp','webp'].includes(ext);
+    if(isImg) {
+      prev.innerHTML = `<div class="text-muted text-sm">🖼️ Image file: ${d.name} (${fmtSize(d.size)})</div>`;
+    } else {
+      prev.innerHTML = `<div class="text-muted text-sm">📄 ${d.name}<br>${fmtSize(d.size)} — binary or large file, not previewable<br><br><button class="btn btn-ghost" onclick="downloadFile()"><i class="fas fa-download"></i> Download</button></div>`;
+    }
+  }
+}
+function downloadFile() {
+  if(!_downloadTarget) return;
+  const a = document.createElement('a');
+  a.href = '/api/browse?path=' + encodeURIComponent(_downloadTarget) + '&dl=1';
+  a.download = _downloadTarget.split('/').pop();
+  a.click();
+}
+function getFileIcon(name) {
+  const ext = (name.split('.').pop()||'').toLowerCase();
+  const m = {json:'fa-code',txt:'fa-file-lines',log:'fa-scroll',csv:'fa-table',
+              xml:'fa-code',html:'fa-code',zip:'fa-file-zipper',tar:'fa-file-zipper',
+              gz:'fa-file-zipper',db:'fa-database',sqlite:'fa-database',
+              png:'fa-file-image',jpg:'fa-file-image',jpeg:'fa-file-image',
+              pdf:'fa-file-pdf',apk:'fa-android'};
+  return 'fa-' + (m[ext] || 'file') + (m[ext]?'':' fa-file');
+}
+function fmtSize(n) {
+  if(!n) return '';
+  const u = ['B','KB','MB','GB'];
+  let i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;}
+  return n.toFixed(i?1:0)+' '+u[i];
+}
 
 // ── Memory ────────────────────────────────────────────────────────────────────
 async function startMemoryAnalysis() {
@@ -1407,6 +1756,9 @@ function addActivity(msg, type='info') {
   while(feed.children.length > 30) feed.removeChild(feed.lastChild);
 }
 
+// Step-to-progress mapping for the 17-step scan
+const _SCAN_STEPS = ['init','device','bugreport','apps','procs','network','calls','sms','browser','accounts','apks','alex','triage','aleapp','mvt','spyware','report','import','done'];
+let _scanStepsSeen = new Set();
 const sse = new EventSource('/stream');
 sse.addEventListener('device_attach', e => {
   const d = JSON.parse(e.data);
@@ -1425,21 +1777,57 @@ sse.addEventListener('case_created', e => {
   addActivity(`Case created: #${d.id} ${d.name}`, 'ok');
   loadStats();
 });
+sse.addEventListener('auto_scan_started', e => {
+  const d = JSON.parse(e.data);
+  toast(`Auto-scan started: ${d.manufacturer||''} ${d.model||''} (${d.serial})`, 'success');
+  addActivity(`Auto-scan started on ${d.serial}`, 'ok');
+  if(currentPage==='devices') {
+    $('triage-status').className='badge badge-blue'; $('triage-status').textContent='Auto-Running';
+    $('scan-progress-card').style.display='block';
+    $('scan-progress-bar').style.width='2%';
+  }
+  _scanStepsSeen.clear();
+});
 sse.addEventListener('triage_log', e => {
   const d = JSON.parse(e.data);
   const cls = d.step==='done'?'ok':d.step==='error'?'err':'info';
   addTriageLog(d.step, d.msg, cls);
-  addMemLog(d.step, d.msg, cls);
+  if(d.step !== 'init' && _SCAN_STEPS.includes(d.step)) {
+    _scanStepsSeen.add(d.step);
+    const pct = Math.min(95, Math.round((_scanStepsSeen.size / _SCAN_STEPS.length) * 100));
+    $('scan-progress-bar').style.width = pct + '%';
+    $('scan-pct').textContent = pct + '%';
+    // add step badge
+    const stepDiv = $('scan-steps');
+    if(stepDiv && !stepDiv.querySelector(`[data-step="${d.step}"]`)) {
+      const b = document.createElement('span');
+      b.className = 'badge badge-blue';
+      b.setAttribute('data-step', d.step);
+      b.textContent = d.step;
+      stepDiv.appendChild(b);
+    }
+  }
+  if(d.step==='error') {
+    addMemLog(d.step, d.msg, 'err');
+    toast('Triage error: '+d.msg.substring(0,80), 'error');
+  }
   if(d.step==='done') {
-    toast('Triage complete!', 'success');
+    addMemLog(d.step, d.msg, 'ok');
     $('triage-status').className='badge badge-green'; $('triage-status').textContent='Done';
     $('mem-status').className='badge badge-green'; $('mem-status').textContent='Done';
+    $('scan-progress-bar').style.width='100%'; $('scan-pct').textContent='100%';
     loadStats();
   }
 });
 sse.addEventListener('triage_done', e => {
   const d = JSON.parse(e.data);
   addActivity(`Triage complete: ${d.serial}`, 'ok');
+  toast('✅ Triage complete! Report ready.', 'success');
+  if(d.report) {
+    _lastReportPath = d.report;
+    $('btn-open-report').style.display = '';
+  }
+  if(d.case_dir) $('triage-case-dir').value = d.case_dir;
 });
 
 // ── Background canvas (subtle hex dots) ─────────────────────────────────────
