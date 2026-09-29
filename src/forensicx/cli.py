@@ -151,10 +151,25 @@ def gui() -> None:
 
 @main.command()
 def hub() -> None:
-    """Launch the ForensicX multi-tool hub (all forensic tools)."""
+    """Launch the ForensicX multi-tool hub (Tkinter desktop app)."""
     try:
         from forensicx_hub.app import run_hub
         run_hub()
     except ImportError as exc:
         console.print(f"[red]Hub dependencies not available:[/] {exc}")
+        sys.exit(1)
+
+
+@main.command()
+@click.option("--port", default=5000, show_default=True, help="HTTP port to listen on.")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind host.")
+@click.option("--no-browser", is_flag=True, help="Don't open browser automatically.")
+def web(port: int, host: str, no_browser: bool) -> None:
+    """Launch the ForensicX professional web dashboard (recommended)."""
+    try:
+        from forensicx_hub.web_app import run_web
+        run_web(host=host, port=port, open_browser=not no_browser)
+    except ImportError as exc:
+        console.print(f"[red]Flask not available:[/] {exc}")
+        console.print("Install with: [bold]pip install flask flask-socketio[/]")
         sys.exit(1)
